@@ -12,6 +12,7 @@
  */
 
 #include <WiFi.h>
+#include <ArduinoOTA.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -62,6 +63,7 @@ void   drawStandby();
 void   drawPumpRunning();
 void   drawReservoirEmpty();
 void   drawWiFiConnecting();
+void   drawOTAProgress(unsigned int progress, unsigned int total);
 void   showResetConfirm();
 String formatNextWater();
 
@@ -97,6 +99,24 @@ void setup() {
         while (!getLocalTime(&ti) && millis() - t0 < 10000) {
             delay(200);
         }
+
+        ArduinoOTA.setHostname("hydrobuddy-mark2");
+        ArduinoOTA.onStart([]() {
+            stopPump(); // safe state before flashing
+        });
+        ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+            drawOTAProgress(progress, total);
+        });
+        ArduinoOTA.onError([](ota_error_t error) {
+            display.clearDisplay();
+            display.setTextSize(1);
+            display.setCursor(16, 24);
+            display.print("OTA Error: ");
+            display.print(error);
+            display.display();
+            delay(2000);
+        });
+        ArduinoOTA.begin();
     }
 
     lastWaterMs = millis(); // 24-hr clock starts at boot
@@ -104,6 +124,8 @@ void setup() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 void loop() {
+    ArduinoOTA.handle();
+
     unsigned long now = millis();
 
     // Reservoir protection – highest priority, overrides everything
@@ -308,6 +330,31 @@ void showResetConfirm() {
     }
 
     updateDisplay(); // restore normal display after blink
+}
+
+// ── Screen: OTA progress ─────────────────────────────────────────────────────
+void drawOTAProgress(unsigned int progress, unsigned int total) {
+    int pct = (total > 0) ? (int)((progress * 100UL) / total) : 0;
+    int barW = (SCREEN_W - 4) * pct / 100;
+
+    display.clearDisplay();
+
+    display.setTextSize(1);
+    display.setCursor(28, 6);
+    display.print("OTA Update...");
+
+    // Progress bar outline
+    display.drawRect(2, 24, SCREEN_W - 4, 12, SSD1306_WHITE);
+    // Progress bar fill
+    if (barW > 0) display.fillRect(2, 24, barW, 12, SSD1306_WHITE);
+
+    display.setTextSize(2);
+    char buf[5];
+    snprintf(buf, sizeof(buf), "%3d%%", pct);
+    display.setCursor(28, 42);
+    display.print(buf);
+
+    display.display();
 }
 
 // ── Utility: next water countdown string ─────────────────────────────────────
