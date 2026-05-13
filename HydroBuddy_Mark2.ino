@@ -22,6 +22,7 @@
 // ── Easy-adjust configuration ─────────────────────────────────────────────────
 const unsigned long PUMP_DURATION    = 60000;                    // ms pump runs per cycle
 const unsigned long DOUBLE_PRESS_WIN = 750;                      // ms window for double-press
+const int           WATER_HOUR       = 8;                        // first daily water time (0-23, local time)
 const char*         NTP_SERVER       = "pool.ntp.org";
 const char*         TZ_STRING        = "PST8PDT,M3.2.0,M11.1.0"; // US/Pacific
 
@@ -30,7 +31,7 @@ const char*         TZ_STRING        = "PST8PDT,M3.2.0,M11.1.0"; // US/Pacific
 // Nano D-pin → GPIO:  D0=44  D1=43  D2=5
 // Nano A-pin → GPIO:  A4=11 (SDA)  A5=12 (SCL)
 #define PIN_REED    A0   // Reed switch: LOW = reservoir OK, HIGH = empty  → GPIO1
-#define PIN_BUTTON  D1   // Momentary button (active LOW, internal pull-up) → GPIO43
+#define PIN_BUTTON  A1   // Momentary button (active LOW, internal pull-up) → GPIO2
 #define PIN_PUMP    D2   // IRLZ44N MOSFET gate                             → GPIO5
 
 #define OLED_SDA    A4   // Standard Nano I2C SDA → GPIO11
@@ -45,9 +46,12 @@ const unsigned long WATER_INTERVAL = 24UL * 3600UL * 1000UL; // 24 hours in ms
 // ── Globals ───────────────────────────────────────────────────────────────────
 Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
 
-unsigned long lastWaterMs = 0;
-bool          pumpRunning = false;
-unsigned long pumpStartMs = 0;
+unsigned long lastWaterMs       = 0;
+bool          firstRunScheduled = false; // true until first WATER_HOUR cycle fires
+unsigned long firstRunTargetMs  = 0;     // millis() target for first water
+bool          pumpRunning       = false;
+bool          pumpIsManual      = false; // true = button hold, false = auto-water cycle
+unsigned long pumpStartMs       = 0;
 
 // Button state
 unsigned long btnPressMs  = 0;
@@ -56,19 +60,19 @@ bool          btnLastLow  = false;
 
 // ── Prototypes ────────────────────────────────────────────────────────────────
 void   handleButton(unsigned long now);
-void   onSinglePress();
-void   onDoublePress();
-void   startPump();
-void   stopPump();
-bool   reservoirOK();
-void   updateDisplay();
-void   drawStandby();
-void   drawPumpRunning();
-void   drawReservoirEmpty();
-void   drawWiFiConnecting();
-void   drawOTAProgress(unsigned int progress, unsigned int total);
-void   showResetConfirm();
-String formatNextWater();
+void          onDoublePress();
+void          startPump(bool manual = false);
+void          stopPump();
+bool          reservoirOK();
+void          updateDisplay();
+void          drawStandby();
+void          drawPumpRunning();
+void          drawReservoirEmpty();
+void          drawWiFiConnecting();
+void          drawOTAProgress(unsigned int progress, unsigned int total);
+void          showResetConfirm();
+String        formatNextWater();
+unsigned long calcMsUntilHour(int targetHour);
 
 // ─────────────────────────────────────────────────────────────────────────────
 void setup() {
@@ -140,7 +144,10 @@ void setup() {
         ArduinoOTA.begin();
     }
 
-    lastWaterMs = millis(); // 24-hr clock starts at boot
+    // Schedule first water at WATER_HOUR; falls back to 24hrs if NTP not available
+    firstRunScheduled = true;
+    firstRunTargetMs  = millis() + calcMsUntilHour(WATER_HOUR);
+    lastWaterMs       = millis();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -165,13 +172,21 @@ void loop() {
     handleButton(now);
 
     // Auto-water trigger
-    if (!pumpRunning && now - lastWaterMs >= WATER_INTERVAL) {
-        lastWaterMs = now; // reset regardless to prevent back-to-back retries
-        if (reservoirOK()) startPump();
+    if (!pumpRunning) {
+        bool shouldWater = false;
+        if (firstRunScheduled && now >= firstRunTargetMs) {
+            firstRunScheduled = false;
+            lastWaterMs       = now;
+            shouldWater       = true;
+        } else if (!firstRunScheduled && now - lastWaterMs >= WATER_INTERVAL) {
+            lastWaterMs = now;
+            shouldWater = true;
+        }
+        if (shouldWater && reservoirOK()) startPump(false);
     }
 
-    // Pump auto-stop
-    if (pumpRunning && now - pumpStartMs >= PUMP_DURATION) {
+    // Pump auto-stop (manual holds run until button release, not duration)
+    if (pumpRunning && !pumpIsManual && now - pumpStartMs >= PUMP_DURATION) {
         stopPump();
     }
 
@@ -183,46 +198,44 @@ void loop() {
 void handleButton(unsigned long now) {
     bool isLow = (digitalRead(PIN_BUTTON) == LOW);
 
-    if (isLow && !btnLastLow) {          // falling edge = press
+    if (isLow && !btnLastLow) {           // falling edge = press
         btnLastLow = true;
         if (awaitDouble && now - btnPressMs <= DOUBLE_PRESS_WIN) {
+            // Double press: stop any running pump, reset schedule
             awaitDouble = false;
+            stopPump();
             onDoublePress();
         } else {
+            // First press: start pump immediately, open double-press window
             awaitDouble = true;
             btnPressMs  = now;
+            if (reservoirOK()) startPump(true);
         }
-    } else if (!isLow && btnLastLow) {   // rising edge = release
+    } else if (!isLow && btnLastLow) {    // rising edge = release
         btnLastLow = false;
+        if (pumpIsManual) stopPump();     // only stop manual holds on release
     }
-
-    // Single-press fires after the double-press window expires with no second press
-    if (awaitDouble && now - btnPressMs > DOUBLE_PRESS_WIN) {
-        awaitDouble = false;
-        onSinglePress();
-    }
-}
-
-void onSinglePress() {
-    if (!pumpRunning && reservoirOK()) startPump();
 }
 
 void onDoublePress() {
-    lastWaterMs = millis(); // reset 24-hr schedule from this moment
+    firstRunScheduled = false;      // cancel 8am first-run, switch to 24hr cycle
+    lastWaterMs       = millis();   // 24hrs from this moment
     showResetConfirm();
 }
 
 // ── Pump control ──────────────────────────────────────────────────────────────
-void startPump() {
+void startPump(bool manual) {
     if (!reservoirOK()) return;
-    pumpStartMs = millis();
-    pumpRunning = true;
+    pumpStartMs  = millis();
+    pumpRunning  = true;
+    pumpIsManual = manual;
     digitalWrite(PIN_PUMP, HIGH);
 }
 
 void stopPump() {
     digitalWrite(PIN_PUMP, LOW);
-    pumpRunning = false;
+    pumpRunning  = false;
+    pumpIsManual = false;
 }
 
 bool reservoirOK() {
@@ -288,9 +301,18 @@ void drawStandby() {
 
 // ── Screen: Pump running countdown ───────────────────────────────────────────
 void drawPumpRunning() {
-    unsigned long elapsed   = millis() - pumpStartMs;
-    unsigned long remaining = (elapsed < PUMP_DURATION) ? PUMP_DURATION - elapsed : 0;
-    int secs = (int)(remaining / 1000);
+    unsigned long elapsed = millis() - pumpStartMs;
+    int secs;
+    const char* label;
+
+    if (pumpIsManual) {
+        secs  = (int)(elapsed / 1000);          // count up while held
+        label = "sec held";
+    } else {
+        unsigned long rem = (elapsed < PUMP_DURATION) ? PUMP_DURATION - elapsed : 0;
+        secs  = (int)(rem / 1000);              // countdown for auto-water
+        label = "sec left";
+    }
 
     display.clearDisplay();
 
@@ -300,13 +322,13 @@ void drawPumpRunning() {
 
     display.setTextSize(4);
     char buf[3];
-    snprintf(buf, sizeof(buf), "%02d", secs);
+    snprintf(buf, sizeof(buf), "%02d", min(secs, 99));
     display.setCursor(40, 18);
     display.print(buf);
 
     display.setTextSize(1);
-    display.setCursor(46, 55);
-    display.print("sec");
+    display.setCursor(28, 55);
+    display.print(label);
 
     display.display();
 }
@@ -386,12 +408,35 @@ void drawOTAProgress(unsigned int progress, unsigned int total) {
 
 // ── Utility: next water countdown string ─────────────────────────────────────
 String formatNextWater() {
-    unsigned long elapsed = millis() - lastWaterMs;
-    if (elapsed >= WATER_INTERVAL) return "now";
-    unsigned long rem  = (WATER_INTERVAL - elapsed) / 1000;
+    unsigned long now = millis();
+    unsigned long rem;
+
+    if (firstRunScheduled) {
+        if (now >= firstRunTargetMs) return "now";
+        rem = (firstRunTargetMs - now) / 1000;
+    } else {
+        unsigned long elapsed = now - lastWaterMs;
+        if (elapsed >= WATER_INTERVAL) return "now";
+        rem = (WATER_INTERVAL - elapsed) / 1000;
+    }
+
     int h = (int)(rem / 3600);
     int m = (int)((rem % 3600) / 60);
     char buf[10];
     snprintf(buf, sizeof(buf), "%dh %02dm", h, m);
     return String(buf);
+}
+
+// Returns ms until the next occurrence of targetHour:00:00 local time
+unsigned long calcMsUntilHour(int targetHour) {
+    struct tm ti;
+    if (!getLocalTime(&ti)) return WATER_INTERVAL; // NTP unavailable – fallback to 24hrs
+
+    long nowSecs    = ti.tm_hour * 3600L + ti.tm_min * 60L + ti.tm_sec;
+    long targetSecs = targetHour * 3600L;
+    long secsUntil  = targetSecs - nowSecs;
+
+    if (secsUntil <= 0) secsUntil += 86400L; // already past today – aim for tomorrow
+
+    return (unsigned long)secsUntil * 1000UL;
 }
