@@ -25,13 +25,16 @@ const unsigned long DOUBLE_PRESS_WIN = 750;                      // ms window fo
 const char*         NTP_SERVER       = "pool.ntp.org";
 const char*         TZ_STRING        = "PST8PDT,M3.2.0,M11.1.0"; // US/Pacific
 
-// ── Pin definitions (XIAO ESP32S3) ───────────────────────────────────────────
-#define PIN_REED    D0   // Reed switch: LOW = reservoir OK, HIGH = empty
-#define PIN_BUTTON  D1   // Momentary button (active LOW, internal pull-up)
-#define PIN_PUMP    D2   // IRLZ44N MOSFET gate
+// ── Pin definitions (Waveshare ESP32-S3-Nano) ────────────────────────────────
+// FQBN: esp32:esp32:nano_nora  (closest match; dedicated Waveshare FQBN pending)
+// Nano D-pin → GPIO:  D0=44  D1=43  D2=5
+// Nano A-pin → GPIO:  A4=11 (SDA)  A5=12 (SCL)
+#define PIN_REED    D0   // Reed switch: LOW = reservoir OK, HIGH = empty  → GPIO44
+#define PIN_BUTTON  D1   // Momentary button (active LOW, internal pull-up) → GPIO43
+#define PIN_PUMP    D2   // IRLZ44N MOSFET gate                             → GPIO5
 
-#define OLED_SDA    D4
-#define OLED_SCL    D5
+#define OLED_SDA    A4   // Standard Nano I2C SDA → GPIO11
+#define OLED_SCL    A5   // Standard Nano I2C SCL → GPIO12
 #define OLED_ADDR   0x3C
 #define SCREEN_W    128
 #define SCREEN_H    64
