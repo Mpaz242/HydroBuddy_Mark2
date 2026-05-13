@@ -29,7 +29,7 @@ const char*         TZ_STRING        = "PST8PDT,M3.2.0,M11.1.0"; // US/Pacific
 // FQBN: esp32:esp32:nano_nora  (closest match; dedicated Waveshare FQBN pending)
 // Nano D-pin → GPIO:  D0=44  D1=43  D2=5
 // Nano A-pin → GPIO:  A4=11 (SDA)  A5=12 (SCL)
-#define PIN_REED    D0   // Reed switch: LOW = reservoir OK, HIGH = empty  → GPIO44
+#define PIN_REED    A0   // Reed switch: LOW = reservoir OK, HIGH = empty  → GPIO1
 #define PIN_BUTTON  D1   // Momentary button (active LOW, internal pull-up) → GPIO43
 #define PIN_PUMP    D2   // IRLZ44N MOSFET gate                             → GPIO5
 
@@ -73,6 +73,7 @@ String formatNextWater();
 // ─────────────────────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
+    delay(2000); // give USB CDC time to enumerate before printing
 
     pinMode(PIN_REED,   INPUT_PULLUP);
     pinMode(PIN_BUTTON, INPUT_PULLUP);
@@ -80,12 +81,29 @@ void setup() {
     digitalWrite(PIN_PUMP, LOW);
 
     Wire.begin(OLED_SDA, OLED_SCL);
+    Wire.setClock(100000); // 100 kHz – more compatible with generic SSD1306 modules
 
-    if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-        Serial.println(F("SSD1306 init failed – check wiring"));
+    // I2C scan – printed to Serial at 115200
+    Serial.println(F("I2C scan:"));
+    bool found = false;
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) {
+            Serial.print(F("  0x")); Serial.println(addr, HEX);
+            found = true;
+        }
+    }
+    if (!found) Serial.println(F("  no devices found"));
+
+    bool oledOK = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+    Serial.print(F("OLED init: "));
+    Serial.println(oledOK ? F("OK") : F("FAILED – check wiring"));
+    if (!oledOK) {
         while (true) delay(100);
     }
 
+    display.ssd1306_command(SSD1306_SETCONTRAST);
+    display.ssd1306_command(0xFF); // max contrast
     display.setTextColor(SSD1306_WHITE);
     drawWiFiConnecting();
 
@@ -130,6 +148,14 @@ void loop() {
     ArduinoOTA.handle();
 
     unsigned long now = millis();
+
+    // Debug: print raw PIN_REED state every second
+    static unsigned long lastDebugMs = 0;
+    if (now - lastDebugMs >= 1000) {
+        lastDebugMs = now;
+        Serial.print(F("PIN_REED (A0): "));
+        Serial.println(digitalRead(PIN_REED) == LOW ? F("LOW  (reservoir OK)") : F("HIGH (reservoir EMPTY)"));
+    }
 
     // Reservoir protection – highest priority, overrides everything
     if (!reservoirOK() && pumpRunning) {
@@ -252,10 +278,9 @@ void drawStandby() {
 
     display.setCursor(0, 43);
     if (WiFi.status() == WL_CONNECTED) {
-        display.print("WiFi: ");
-        display.print(WiFi.localIP().toString());
+        display.print("WiFi: Connected");
     } else {
-        display.print("WiFi: offline");
+        display.print("WiFi: Offline");
     }
 
     display.display();
@@ -290,16 +315,15 @@ void drawPumpRunning() {
 void drawReservoirEmpty() {
     display.clearDisplay();
 
+    // "! EMPTY !" = 9 chars × 12px = 108px → x=(128-108)/2=10
     display.setTextSize(2);
-    display.setCursor(8, 3);
-    display.print("!! EMPTY !!");
+    display.setCursor(10, 3);
+    display.print("! EMPTY !");
 
     display.setTextSize(1);
-    display.setCursor(4, 28);
+    display.setCursor(4, 32);
     display.print("Reservoir is empty.");
-    display.setCursor(16, 40);
-    display.print("Pump blocked.");
-    display.setCursor(10, 52);
+    display.setCursor(10, 46);
     display.print("Refill to resume.");
 
     display.display();
